@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>iCapture - Smart Monitoring</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+        <div class="sidebar-header">
+            <div class="logo-container">
+                <div class="logo-icon">📹</div>
+                <div class="logo-text">
+                    <h2>iCapture</h2>
+                    <p>Smart Monitoring</p>
+                </div>
+            </div>
+        </div>
+
+        <nav class="sidebar-nav">
+            <a href="#" class="nav-link active" data-page="dashboard">
+                <span class="nav-icon">📊</span>
+                <span class="nav-label">Dashboard</span>
+            </a>
+            <a href="#" class="nav-link" data-page="violations">
+                <span class="nav-icon">⚠️</span>
+                <span class="nav-label">Violations</span>
+            </a>
+            <a href="#" class="nav-link" data-page="reports">
+                <span class="nav-icon">📈</span>
+                <span class="nav-label">Reports</span>
+            </a>
+            <a href="#" class="nav-link" data-page="settings">
+                <span class="nav-icon">⚙️</span>
+                <span class="nav-label">Settings</span>
+            </a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <div class="user-profile">
+                <div class="user-avatar">👤</div>
+                <div class="user-info">
+                    <span class="user-name">Admin</span>
+                    <span class="user-role">Administrator</span>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Top Header -->
+        <header class="top-header">
+            <div class="header-left">
+                <h1 class="page-title">Dashboard</h1>
+            </div>
+            <div class="header-right">
+                <div class="header-item">
+                    <span class="datetime" id="currentDateTime"></span>
+                </div>
+                <div class="header-item">
+                    <div class="status-badge success">
+                        <span class="status-dot"></span>
+                        <span>System Active</span>
+                    </div>
+                </div>
+                <button class="header-icon-btn">🔔</button>
+                <button class="header-icon-btn">❓</button>
+            </div>
+        </header>
+
+        <!-- Dashboard Page -->
+        <div class="page-content active" id="dashboard-page">
+            <!-- Camera Feeds -->
+            <section class="section">
+                <div class="camera-feeds-grid">
+                    <div class="camera-card large">
+                        <div class="camera-card-header">
+                            <h3>RSU Gate 3</h3>
+                            <span class="live-badge">● LIVE</span>
+                        </div>
+                        <div class="camera-viewport">
+                            <img src="/api/cameras/feed/wide_angle" alt="Wide Angle Feed" class="camera-stream">
+                        </div>
+                    </div>
+
+                    <div class="camera-card small">
+                        <div class="camera-card-header">
+                            <h3>RSU Gate 3</h3>
+                            <span class="live-badge">● LIVE</span>
+                        </div>
+                        <div class="camera-viewport">
+                            <img src="/api/cameras/feed/plate" alt="Plate Feed" class="camera-stream">
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Alerts & Live Detections -->
+            <section class="section">
+                <h2 class="section-title">Alerts & Live Detections</h2>
+
+                <div class="alerts-table-container">
+                    <table class="alerts-table">
+                        <thead>
+                            <tr>
+                                <th>TIMESTAMP</th>
+                                <th>PLATE NUMBER</th>
+                                <th>VIOLATION</th>
+                                <th>CAMERA</th>
+                            </tr>
+                        </thead>
+                        <tbody id="alertsTableBody">
+                            <tr>
+                                <td colspan="4" class="no-data">Loading alerts...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <!-- Violations Page -->
+        <div class="page-content" id="violations-page">
+            <div class="page-header">
+                <h2 class="section-title">Helmet Violation Log</h2>
+
+                <div class="page-controls">
+                    <input type="text" placeholder="Search by Plate Number..." class="search-input" id="searchInput">
+                    <select class="filter-select" id="dateRangeFilter">
+                        <option value="">Date Range</option>
+                        <option value="today">Today</option>
+                        <option value="week">Last 7 Days</option>
+                        <option value="month">Last 30 Days</option>
+                    </select>
+                    <select class="filter-select" id="locationFilter">
+                        <option value="">Location</option>
+                        <option value="gate3">RSU Gate 3</option>
+                    </select>
+                    <select class="filter-select" id="statusFilter">
+                        <option value="">Status</option>
+                        <option value="pending">Pending Review</option>
+                        <option value="verified">Citation Issued</option>
+                        <option value="dismissed">Dismissed</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="violations-grid" id="violationsGrid">
+                <!-- Violation cards will be inserted here -->
+            </div>
+
+            <div class="pagination" id="violationsPagination">
+                <button class="btn-page" id="prevPage">←</button>
+                <span class="page-info" id="pageInfo">Page 1</span>
+                <button class="btn-page" id="nextPage">→</button>
+            </div>
+        </div>
+
+        <!-- Reports Page -->
+        <div class="page-content" id="reports-page">
+            <div class="page-header">
+                <h2 class="section-title">Reports & Analytics</h2>
+
+                <div class="page-controls">
+                    <button class="btn-primary">Today</button>
+                    <button class="btn-secondary">Last 7 Days</button>
+                    <button class="btn-secondary">Last 90 Days</button>
+                    <button class="btn-secondary">Custom Range</button>
+                    <button class="btn-primary">📊 Export Report</button>
+                </div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="totalViolationsToday">0</div>
+                    <div class="stat-label">Total Violations Today</div>
+                    <div class="stat-change positive">↑ 8.2% from yesterday</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-value" id="activeAlerts">0</div>
+                    <div class="stat-label">Active Alerts</div>
+                    <div class="stat-change negative">↓ 1.0% from yesterday</div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-value" id="citationsIssued">0</div>
+                    <div class="stat-label">Citations Issued</div>
+                    <div class="stat-change positive">↑ 2.8% from yesterday</div>
+                </div>
+            </div>
+
+            <!-- Charts -->
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>Violation Trends Over Time</h3>
+                    <canvas id="trendsChart"></canvas>
+                </div>
+
+                <div class="chart-card">
+                    <h3>Violations by Location</h3>
+                    <canvas id="locationsChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Map -->
+            <div class="map-card">
+                <h3>Violation Hotspots</h3>
+                <div class="map-placeholder">
+                    <p>📍 Map visualization</p>
+                    <p style="font-size: 0.875rem; color: var(--text-muted);">Geographic distribution of violations</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings Page -->
+        <div class="page-content" id="settings-page">
+            <h2 class="section-title">Settings</h2>
+            <p style="color: var(--text-muted);">System configuration settings will be available here.</p>
+        </div>
+    </main>
+
+    <!-- Violation Detail Modal -->
+    <div class="modal" id="violationModal">
+        <div class="modal-content large">
+            <div class="modal-header">
+                <h2>Violation Incident Details</h2>
+                <button class="btn-close" id="closeModal">×</button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <p>Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast" id="toast"></div>
+
+    <script src="js/dashboard.js"></script>
+</body>
+
+</html>
