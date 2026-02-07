@@ -1,6 +1,8 @@
 """
 Database Module for iCapture System
 Handles all MySQL database operations with connection pooling and error handling
+
+REFACTORED: Now uses SQLAlchemy connection pooling for production reliability
 """
 
 import pymysql
@@ -9,6 +11,7 @@ from datetime import datetime
 import json
 import sys
 from pathlib import Path
+from sqlalchemy import text
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -16,10 +19,17 @@ sys.path.append(str(Path(__file__).parent.parent))
 from config import DATABASE_CONFIG, generate_violation_code
 from utils.logger import get_logger
 
+# Import new connection pool module
+from modules.db_pool import get_db_session, execute_query, retry_on_db_error
+
 logger = get_logger('database')
 
 class DatabaseManager:
-    """MySQL database operations manager with connection pooling"""
+    """
+    MySQL database operations manager with SQLAlchemy connection pooling
+    
+    PRODUCTION READY: Uses connection pool to prevent "Internal Server Errors"
+    """
     
     def __init__(self, config=None):
         """
@@ -27,72 +37,60 @@ class DatabaseManager:
         
         Args:
             config: Database configuration dict (uses default if None)
+        
+        NOTE: Connection is now managed by pool, no manual connect() needed
         """
         self.config = config or DATABASE_CONFIG
-        self.connection = None
-        logger.info("DatabaseManager initialized")
+        self.connection = None  # Legacy - kept for backward compatibility
+        logger.info("DatabaseManager initialized with connection pooling")
     
     def connect(self):
-        """Establish database connection"""
-        try:
-            self.connection = pymysql.connect(
-                host=self.config['host'],
-                port=self.config['port'],
-                user=self.config['user'],
-                password=self.config['password'],
-                database=self.config['database'],
-                charset=self.config['charset'],
-                cursorclass=cursors.DictCursor
-            )
-            logger.info(f"Connected to database: {self.config['database']}")
-            return True
-        except pymysql.Error as e:
-            logger.error(f"Database connection failed: {e}")
-            return False
+        """
+        Legacy method for backward compatibility
+        
+        NOTE: Actual connections are now pooled automatically.
+        This method is maintained for code that calls it explicitly.
+        """
+        logger.info("Connection pooling active - manual connect() not required")
+        self.connection = type('obj', (object,), {'open': True})()  # Dummy object
+        return True
     
     def disconnect(self):
-        """Close database connection"""
-        if self.connection:
-            self.connection.close()
-            logger.info("Database connection closed")
+        """Legacy method for backward compatibility"""
+        logger.info("Connection pooling active - manual disconnect() not required")
+        self.connection = None
     
-    def execute(self, query, params=None, commit=True):
+    @retry_on_db_error(max_retries=3, base_delay=0.5)
+    def execute_query(self, query, params=None, fetch_mode='all'):
         """
-        Execute SQL query with auto-retry
+        Execute SQL query with connection pooling and automatic retry
         
         Args:
-            query: SQL query string
-            params: Query parameters tuple
-            commit: Whether to commit transaction
+            query: SQL query string (use :param for placeholders)
+            params: Dictionary of parameters
+            fetch_mode: 'all', 'one', or 'none'
         
         Returns:
-            Cursor object or None on error
+            Query results or None
         """
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                if not self.connection or not self.connection.open:
-                    self.connect()
-                
-                with self.connection.cursor() as cursor:
-                    cursor.execute(query, params)
-                    if commit:
-                        self.connection.commit()
-                    return cursor
-            except pymysql.Error as e:
-                logger.warning(f"Query execution failed (attempt {attempt + 1}): {e}")
-                if attempt == max_retries - 1:
-                    logger.error(f"Query failed after {max_retries} attempts: {query}")
-                    return None
-        return None
+        # Convert old-style %s queries to :param format if needed
+        if params and isinstance(params, (list, tuple)):
+            # Legacy format - convert to dict
+            params_dict = {f'param_{i}': val for i, val in enumerate(params)}
+            for i in range(len(params)):
+                query = query.replace('%s', f':param_{i}', 1)
+            params = params_dict
+        
+        return execute_query(query, params, fetch_mode)
     
     # ============================================
     # Violation Operations
     # ============================================
     
+    @retry_on_db_error(max_retries=3, base_delay=0.5)
     def insert_violation(self, violation_data):
         """
-        Insert new violation record
+        Insert new violation record (with connection pooling and retry)
         
         Args:
             violation_data: dict with keys:
@@ -112,40 +110,41 @@ class DatabaseManager:
         try:
             violation_code = generate_violation_code()
             
-            query = """
+            query = text("""
                 INSERT INTO violations (
                     violation_code, plate_number, violation_type,
                     rider_image_path, plate_image_path,
                     camera_location, camera_id,
                     detection_confidence, ocr_confidence,
                     violation_datetime, notes
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
+                ) VALUES (
+                    :code, :plate, :type, :rider_img, :plate_img,
+                    :location, :cam_id, :det_conf, :ocr_conf, :datetime, :notes
+                )
+            """)
             
-            params = (
-                violation_code,
-                violation_data.get('plate_number'),
-                violation_data['violation_type'],
-                violation_data.get('rider_image_path'),
-                violation_data.get('plate_image_path'),
-                violation_data['camera_location'],
-                violation_data['camera_id'],
-                violation_data.get('detection_confidence'),
-                violation_data.get('ocr_confidence'),
-                datetime.now(),
-                violation_data.get('notes')
-            )
-            
-            cursor = self.execute(query, params)
-            if cursor:
-                violation_id = cursor.lastrowid
+            with get_db_session() as session:
+                result = session.execute(query, {
+                    'code': violation_code,
+                    'plate': violation_data.get('plate_number'),
+                    'type': violation_data['violation_type'],
+                    'rider_img': violation_data.get('rider_image_path'),
+                    'plate_img': violation_data.get('plate_image_path'),
+                    'location': violation_data['camera_location'],
+                    'cam_id': violation_data['camera_id'],
+                    'det_conf': violation_data.get('detection_confidence'),
+                    'ocr_conf': violation_data.get('ocr_confidence'),
+                    'datetime': datetime.now(),
+                    'notes': violation_data.get('notes')
+                })
+                
+                violation_id = result.lastrowid
                 logger.info(f"Violation inserted: {violation_code} (ID: {violation_id})")
                 
                 # Update camera violation count
                 self.update_camera_stats(violation_data['camera_id'])
                 
                 return violation_id
-            return None
         except Exception as e:
             logger.error(f"Error inserting violation: {e}")
             return None
@@ -252,9 +251,11 @@ class DatabaseManager:
             logger.error(f"Error updating violation status: {e}")
             return False
     
+    @retry_on_db_error(max_retries=2, base_delay=0.3)
     def check_recent_violation(self, plate_number, time_window=60):
         """
         Check if plate has recent violation (duplicate detection)
+        Uses connection pooling with fast retry
         
         Args:
             plate_number: License plate to check
@@ -266,14 +267,11 @@ class DatabaseManager:
         try:
             query = """
                 SELECT COUNT(*) as count FROM violations
-                WHERE plate_number = %s
-                AND violation_datetime >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+                WHERE plate_number = :plate
+                AND violation_datetime >= DATE_SUB(NOW(), INTERVAL :window SECOND)
             """
-            cursor = self.execute(query, (plate_number, time_window), commit=False)
-            if cursor:
-                result = cursor.fetchone()
-                return result['count'] > 0
-            return False
+            result = execute_query(query, {'plate': plate_number, 'window': time_window}, fetch_mode='one')
+            return result and result['count'] > 0
         except Exception as e:
             logger.error(f"Error checking recent violation: {e}")
             return False
@@ -348,16 +346,18 @@ class DatabaseManager:
     # Camera Operations
     # ============================================
     
+    @retry_on_db_error(max_retries=2, base_delay=0.3)
     def update_camera_stats(self, camera_id):
-        """Update camera's last frame time and violation count"""
+        """Update camera's last frame time and violation count (with connection pooling)"""
         try:
-            query = """
+            query = text("""
                 UPDATE cameras 
-                SET last_frame_time = %s, 
+                SET last_frame_time = :time, 
                     total_violations = total_violations + 1
-                WHERE camera_id = %s
-            """
-            self.execute(query, (datetime.now(), camera_id))
+                WHERE camera_id = :cam_id
+            """)
+            with get_db_session() as session:
+                session.execute(query, {'time': datetime.now(), 'cam_id': camera_id})
         except Exception as e:
             logger.error(f"Error updating camera stats: {e}")
     

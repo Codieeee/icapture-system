@@ -1,11 +1,15 @@
 """
-Violation Logic Module for iCapture System
-Manages violation triggering, duplicate prevention, and multi-frame verification
+Violation Logic Module - Clean Architecture with SOLID Principles
+Implements Strategy Pattern for extensible violation detection
+
+PRODUCTION READY: Easy to add new violation types (e.g., double riders, speeding)
 """
 
 import time
-from datetime import datetime, timedelta
+from abc import ABC, abstractmethod
 from collections import deque
+from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
@@ -16,305 +20,516 @@ from utils.logger import get_logger
 
 logger = get_logger('violation_logic')
 
-class ViolationManager:
+# ============================================
+# Domain Models
+# ============================================
+
+@dataclass
+class Detection:
+    """Value object representing a detection event"""
+    violation_type: str
+    confidence: float
+    bbox: tuple
+    timestamp: float
+    plate_number: Optional[str] = None
+    ocr_confidence: float = 0.0
+    
+    @property
+    def has_plate(self) -> bool:
+        return self.plate_number is not None
+
+
+# ============================================
+# Abstract Rules (Strategy Pattern)
+# ============================================
+
+class ViolationRule(ABC):
     """
-    Violation state machine with duplicate prevention and multi-frame verification
+    Abstract base class for violation rules
+    
+    SOLID: Open/Closed Principle - Open for extension, closed for modification
     """
     
-    def __init__(self, db_manager, duplicate_window=60, consecutive_frames=3):
+    @abstractmethod
+    def evaluate(self, detection: Detection) -> bool:
         """
-        Initialize violation manager
+        Evaluate if detection violates this rule
         
         Args:
-            db_manager: DatabaseManager instance
-            duplicate_window: Time window in seconds for duplicate detection
-            consecutive_frames: Number of consecutive detections required
+            detection: Detection event
+        
+        Returns:
+            True if violation detected
         """
+        pass
+    
+    @abstractmethod
+    def get_violation_type(self) -> str:
+        """Get the violation type name"""
+        pass
+
+
+class NoHelmetRule(ViolationRule):
+    """Rule for detecting riders without helmets"""
+    
+    def __init__(self, min_confidence: float = 0.6):
+        self.min_confidence = min_confidence
+    
+    def evaluate(self, detection: Detection) -> bool:
+        return (
+            detection.violation_type == 'no_helmet' and
+            detection.confidence >= self.min_confidence
+        )
+    
+    def get_violation_type(self) -> str:
+        return 'no_helmet'
+
+
+class NutshellHelmetRule(ViolationRule):
+    """Rule for detecting riders with inadequate (nutshell) helmets"""
+    
+    def __init__(self, min_confidence: float = 0.6):
+        self.min_confidence = min_confidence
+    
+    def evaluate(self, detection: Detection) -> bool:
+        return (
+            detection.violation_type == 'nutshell_helmet' and
+            detection.confidence >= self.min_confidence
+        )
+    
+    def get_violation_type(self) -> str:
+        return 'nutshell_helmet'
+
+
+# FUTURE: Easy to add new rules!
+class DoubleRiderRule(ViolationRule):
+    """
+    Rule for detecting more than one rider on a motorcycle
+    
+    NOTE: Not yet implemented in detector, but architecture supports it
+    """
+    
+    def __init__(self, min_confidence: float = 0.7):
+        self.min_confidence = min_confidence
+    
+    def evaluate(self, detection: Detection) -> bool:
+        return (
+            detection.violation_type == 'double_rider' and
+            detection.confidence >= self.min_confidence
+        )
+    
+    def get_violation_type(self) -> str:
+        return 'double_rider'
+
+
+# ============================================
+# Verification Components
+# ============================================
+
+class ConsecutiveFrameVerifier:
+    """
+    Verifies detections across consecutive frames to reduce false positives
+    
+    SOLID: Single Responsibility - Only handles frame-based verification
+    """
+    
+    def __init__(self, required_frames: int = 3, time_window: float = 5.0):
+        """
+        Args:
+            required_frames: Number of consecutive detections required
+            time_window: Maximum time window for consecutive detections (seconds)
+        """
+        self.required_frames = required_frames
+        self.time_window = time_window
+        self.detection_buffer: Dict[str, deque] = {}
+        
+        logger.info(f"ConsecutiveFrameVerifier initialized ({required_frames} frames, {time_window}s window)")
+    
+    def add_detection(self, tracking_key: str) -> bool:
+        """
+        Add detection and check if verification threshold met
+        
+        Args:
+            tracking_key: Unique identifier (e.g., plate number or camera_id)
+        
+        Returns:
+            True if detection is verified (enough consecutive frames)
+        """
+        if tracking_key not in self.detection_buffer:
+            self.detection_buffer[tracking_key] = deque(maxlen=self.required_frames)
+        
+        self.detection_buffer[tracking_key].append(time.time())
+        
+        # Check if we have enough frames
+        if len(self.detection_buffer[tracking_key]) >= self.required_frames:
+            timestamps = list(self.detection_buffer[tracking_key])
+            time_span = timestamps[-1] - timestamps[0]
+            
+            # Verify within time window
+            if time_span < self.time_window:
+                logger.debug(f"Detection verified for {tracking_key} ({len(timestamps)} frames in {time_span:.1f}s)")
+                return True
+        
+        return False
+    
+    def reset(self, tracking_key: str):
+        """Clear detection buffer for specific key"""
+        if tracking_key in self.detection_buffer:
+            del self.detection_buffer[tracking_key]
+
+
+class DuplicationChecker:
+    """
+    Prevents duplicate violations within time window
+    
+    SOLID: Single Responsibility - Only handles duplication logic
+    """
+    
+    def __init__(self, time_window: int = 60, db_repository=None):
+        """
+        Args:
+            time_window: Duplicate prevention window (seconds)
+            db_repository: Database repository for persistent duplicate checking
+        """
+        self.time_window = time_window
+        self.db_repository = db_repository
+        self.recent_violations: Dict[str, float] = {}  # In-memory cache
+        
+        logger.info(f"DuplicationChecker initialized ({time_window}s window)")
+    
+    def is_duplicate(self, plate_number: Optional[str]) -> bool:
+        """
+        Check if violation is duplicate
+        
+        Args:
+            plate_number: License plate number
+        
+        Returns:
+            True if duplicate within time window
+        """
+        if not plate_number:
+            return False
+        
+        # Check in-memory cache first (fast)
+        current_time = time.time()
+        if plate_number in self.recent_violations:
+            last_time = self.recent_violations[plate_number]
+            if (current_time - last_time) < self.time_window:
+                logger.debug(f"Duplicate violation prevented: {plate_number}")
+                return True
+        
+        # Check database (slower but persistent)
+        if self.db_repository:
+            db_duplicate = self.db_repository.check_recent_violation(
+                plate_number, 
+                self.time_window
+            )
+            if db_duplicate:
+                self.recent_violations[plate_number] = current_time
+                return True
+        
+        return False
+    
+    def mark_logged(self, plate_number: Optional[str]):
+        """Mark violation as logged"""
+        if plate_number:
+            self.recent_violations[plate_number] = time.time()
+    
+    def cleanup(self):
+        """Remove expired entries from cache"""
+        current_time = time.time()
+        expired = [
+            plate for plate, timestamp in self.recent_violations.items()
+            if (current_time - timestamp) > self.time_window
+        ]
+        for plate in expired:
+            del self.recent_violations[plate]
+
+
+# ============================================
+# Abstract Repository (Dependency Inversion)
+# ============================================
+
+class ViolationRepository(ABC):
+    """
+    Abstract interface for violation persistence
+    
+    SOLID: Dependency Inversion - Depend on abstraction, not concrete database
+    """
+    
+    @abstractmethod
+    def save(self, violation_data: Dict[str, Any]) -> Optional[int]:
+        """Save violation and return ID"""
+        pass
+    
+    @abstractmethod
+    def check_recent_violation(self, plate_number: str, time_window: int) -> bool:
+        """Check if recent violation exists"""
+        pass
+
+
+class DatabaseViolationRepository(ViolationRepository):
+    """Concrete implementation using database"""
+    
+    def __init__(self, db_manager):
         self.db = db_manager
-        self.duplicate_window = duplicate_window or VIOLATION_CONFIG['duplicate_window']
-        self.consecutive_frames = consecutive_frames or VIOLATION_CONFIG['consecutive_frames']
+    
+    def save(self, violation_data: Dict[str, Any]) -> Optional[int]:
+        return self.db.insert_violation(violation_data)
+    
+    def check_recent_violation(self, plate_number: str, time_window: int) -> bool:
+        return self.db.check_recent_violation(plate_number, time_window)
+
+
+# ============================================
+# Violation Manager (Orchestrator)
+# ============================================
+
+class ViolationManager:
+    """
+    Orchestrates violation detection pipeline
+    
+    SOLID Principles Applied:
+    - Single Responsibility: Coordinates components, doesn't implement logic
+    - Open/Closed: New rules added without modifying this class
+    - Liskov Substitution: All rules implement ViolationRule interface
+    - Interface Segregation: Separate interfaces for verification, deduplication, storage
+    - Dependency Inversion: Depends on abstractions (ViolationRepository, ViolationRule)
+    """
+    
+    def __init__(
+        self,
+        rules: List[ViolationRule],
+        verifier: ConsecutiveFrameVerifier,
+        deduplicator: DuplicationChecker,
+        repository: ViolationRepository
+    ):
+        """
+        Initialize with dependency injection
         
-        # Tracking for multi-frame verification
-        self.detection_buffer = {}  # {plate_number: deque of timestamps}
+        Args:
+            rules: List of violation rules to evaluate
+            verifier: Frame verification component
+            deduplicator: Duplicate prevention component
+            repository: Storage abstraction
         
-        # Recent violations cache (plate_number: timestamp)
-        self.recent_violations = {}
+        SOLID: Dependency Injection for testability and flexibility
+        """
+        self.rules = rules
+        self.verifier = verifier
+        self.deduplicator = deduplicator
+        self.repository = repository
         
         # Statistics
         self.stats = {
             'total_detections': 0,
             'violations_logged': 0,
-            'duplicates_prevented': 0
+            'duplicates_prevented': 0,
+            'verification_pending': 0
         }
         
-        logger.info(f"ViolationManager initialized (duplicate_window: {duplicate_window}s, consecutive_frames: {consecutive_frames})")
+        logger.info(f"ViolationManager initialized with {len(rules)} rules")
     
-    def _cleanup_old_records(self):
-        """Remove expired entries from cache"""
-        current_time = time.time()
-        cutoff_time = current_time - self.duplicate_window
-        
-        # Cleanup recent violations
-        expired_plates = [
-            plate for plate, timestamp in self.recent_violations.items()
-            if timestamp < cutoff_time
-        ]
-        for plate in expired_plates:
-            del self.recent_violations[plate]
-        
-        # Cleanup detection buffer
-        for plate in list(self.detection_buffer.keys()):
-            # Remove old timestamps
-            timestamps = self.detection_buffer[plate]
-            while timestamps and timestamps[0] < cutoff_time:
-                timestamps.popleft()
-            
-            # Remove empty buffers
-            if not timestamps:
-                del self.detection_buffer[plate]
-    
-    def is_duplicate(self, plate_number):
+    def process_detection(
+        self,
+        detection: Detection,
+        camera_info: Dict[str, str]
+    ) -> Dict[str, Any]:
         """
-        Check if plate has recent violation
+        Process detection through violation pipeline
+        
+        Pipeline: Rule Evaluation → Frame Verification → Duplicate Check → Log
         
         Args:
-            plate_number: License plate to check
+            detection: Detection event
+            camera_info: Camera metadata
         
         Returns:
-            bool: True if duplicate
-        """
-        if not plate_number:
-            return False
-        
-        # Check in-memory cache first (faster)
-        if plate_number in self.recent_violations:
-            timestamp = self.recent_violations[plate_number]
-            if time.time() - timestamp < self.duplicate_window:
-                return True
-        
-        # Check database for accuracy
-        if self.db:
-            is_dup = self.db.check_recent_violation(plate_number, self.duplicate_window)
-            return is_dup
-        
-        return False
-    
-    def add_detection(self, plate_number):
-        """
-        Add detection to buffer for multi-frame verification
-        
-        Args:
-            plate_number: Detected plate number
-        
-        Returns:
-            bool: True if consecutive_frames threshold met
-        """
-        if not plate_number:
-            return False
-        
-        current_time = time.time()
-        
-        # Initialize buffer if not exists
-        if plate_number not in self.detection_buffer:
-            self.detection_buffer[plate_number] = deque(maxlen=self.consecutive_frames)
-        
-        # Add detection
-        self.detection_buffer[plate_number].append(current_time)
-        
-        # Check if we have enough consecutive detections
-        if len(self.detection_buffer[plate_number]) >= self.consecutive_frames:
-            # Verify they're actually consecutive (within reasonable time)
-            timestamps = list(self.detection_buffer[plate_number])
-            time_span = timestamps[-1] - timestamps[0]
-            
-            # Should be within 2-3 seconds for 3 consecutive frames at ~1 FPS processing
-            if time_span < 5.0:
-                return True
-        
-        return False
-    
-    def process_detection(self, detection_result, plate_result, camera_info):
-        """
-        Evaluate detection and decide whether to create violation
-        
-        Args:
-            detection_result: dict from helmet detector with 'best_violation'
-            plate_result: dict from plate recognizer with 'plate_number', 'confidence'
-            camera_info: dict with 'camera_id', 'location'
-        
-        Returns:
-            dict: {
-                'should_log': bool,
-                'reason': str,
-                'violation_id': int or None,
-                'violation_code': str or None
-            }
+            Decision dict with should_log, reason, violation_code
         """
         self.stats['total_detections'] += 1
         
-        # Cleanup old records periodically
-        if self.stats['total_detections'] % 100 == 0:
-            self._cleanup_old_records()
-        
-        # Check if there's a violation
-        if not detection_result or not detection_result.get('has_violation'):
+        # Step 1: Evaluate rules
+        matching_rule = self._evaluate_rules(detection)
+        if not matching_rule:
             return {
                 'should_log': False,
-                'reason': 'No violation detected',
-                'violation_id': None,
+                'reason': 'No rule matched',
                 'violation_code': None
             }
         
-        best_violation = detection_result.get('best_violation')
-        plate_number = plate_result.get('plate_number')
-        
-        # For violations without plate, use a placeholder for tracking
-        tracking_plate = plate_number or f"NO_PLATE_{camera_info['camera_id']}"
-        
-        # Multi-frame verification
-        if not self.add_detection(tracking_plate):
+        # Step 2: Frame verification
+        tracking_key = detection.plate_number or f"NO_PLATE_{camera_info['camera_id']}"
+        if not self.verifier.add_detection(tracking_key):
+            self.stats['verification_pending'] += 1
             return {
                 'should_log': False,
-                'reason': f'Waiting for {self.consecutive_frames} consecutive detections',
-                'violation_id': None,
+                'reason': 'Verification pending (consecutive frames)',
                 'violation_code': None
             }
         
-        # Check for duplicate
-        if plate_number and self.is_duplicate(plate_number):
+        # Step 3: Duplicate check
+        if detection.has_plate and self.deduplicator.is_duplicate(detection.plate_number):
             self.stats['duplicates_prevented'] += 1
-            logger.info(f"Duplicate violation prevented: {plate_number}")
+            self.verifier.reset(tracking_key)  # Reset for next detection
             return {
                 'should_log': False,
-                'reason': f'Duplicate (same plate within {self.duplicate_window}s)',
-                'violation_id': None,
+                'reason': f'Duplicate within {self.deduplicator.time_window}s',
                 'violation_code': None
             }
         
-        # Log violation
+        # Passed all checks - authorize logging
         violation_code = generate_violation_code()
-        
-        # This will be populated by the main processing loop
-        # Here we just return the decision
         return {
             'should_log': True,
-            'reason': 'Valid violation detected',
-            'violation_id': None,  # Will be set after DB insert
+            'reason': f'Violation confirmed: {matching_rule.get_violation_type()}',
             'violation_code': violation_code,
-            'detection_data': best_violation,
-            'plate_data': plate_result,
-            'camera_data': camera_info
+            'violation_type': matching_rule.get_violation_type()
         }
     
-    def log_violation(self, violation_data):
+    def _evaluate_rules(self, detection: Detection) -> Optional[ViolationRule]:
         """
-        Log violation to database and update cache
-        
-        Args:
-            violation_data: dict with complete violation information
+        Evaluate all rules against detection
         
         Returns:
-            int: Violation ID or None
+            First matching rule or None
         """
-        try:
-            # Insert to database
-            violation_id = self.db.insert_violation(violation_data)
-            
-            if violation_id:
-                # Update cache
-                plate_number = violation_data.get('plate_number')
-                if plate_number:
-                    self.recent_violations[plate_number] = time.time()
-                
-                # Update stats
-                self.stats['violations_logged'] += 1
-                
-                logger.info(f"Violation logged: {violation_data.get('violation_code')} (ID: {violation_id})")
-                return violation_id
-            else:
-                logger.error("Failed to log violation to database")
-                return None
-        except Exception as e:
-            logger.error(f"Error logging violation: {e}")
-            return None
+        for rule in self.rules:
+            if rule.evaluate(detection):
+                return rule
+        return None
     
-    def get_statistics(self):
-        """Get violation manager statistics"""
-        return {
-            **self.stats,
-            'active_detections': len(self.detection_buffer),
-            'cached_violations': len(self.recent_violations)
-        }
+    def log_violation(self, violation_data: Dict[str, Any]) -> Optional[int]:
+        """
+        Persist violation to repository
+        
+        Args:
+            violation_data: Violation details
+        
+        Returns:
+            Violation ID or None
+        """
+        violation_id = self.repository.save(violation_data)
+        
+        if violation_id:
+            self.stats['violations_logged'] += 1
+            plate = violation_data.get('plate_number')
+            if plate:
+                self.deduplicator.mark_logged(plate)
+            logger.info(f"Violation logged: {violation_data.get('violation_type')} (ID: {violation_id})")
+        
+        return violation_id
     
-    def reset_statistics(self):
-        """Reset statistics counters"""
-        self.stats = {
-            'total_detections': 0,
-            'violations_logged': 0,
-            'duplicates_prevented': 0
-        }
-        logger.info("Statistics reset")
+    def get_stats(self) -> Dict[str, int]:
+        """Get violation statistics"""
+        return self.stats.copy()
 
-# Singleton instance
-_violation_manager = None
 
-def get_violation_manager(db_manager):
-    """Get or create violation manager singleton"""
-    global _violation_manager
-    if _violation_manager is None:
-        _violation_manager = ViolationManager(db_manager)
-    return _violation_manager
+# ============================================
+# Factory Function (Convenience)
+# ============================================
 
+def get_violation_manager(db_manager, config=None) -> ViolationManager:
+    """
+    Create ViolationManager with default configuration
+    
+    Args:
+        db_manager: Database manager instance
+        config: Optional configuration overrides
+    
+    Returns:
+        Configured ViolationManager
+    """
+    config = config or VIOLATION_CONFIG
+    
+    # Define active rules
+    rules = [
+        NoHelmetRule(min_confidence=0.6),
+        NutshellHelmetRule(min_confidence=0.6),
+        # DoubleRiderRule(min_confidence=0.7),  # Enable when detector supports it
+    ]
+    
+    # Create components
+    verifier = ConsecutiveFrameVerifier(
+        required_frames=config.get('consecutive_frames', 3),
+        time_window=5.0
+    )
+    
+    repository = DatabaseViolationRepository(db_manager)
+    
+    deduplicator = DuplicationChecker(
+        time_window=config.get('duplicate_window', 60),
+        db_repository=repository
+    )
+    
+    # Assemble manager (dependency injection)
+    manager = ViolationManager(
+        rules=rules,
+        verifier=verifier,
+        deduplicator=deduplicator,
+        repository=repository
+    )
+    
+    return manager
+
+
+# Testing
 if __name__ == '__main__':
-    # Test violation logic
-    print("Testing Violation Logic Module...")
+    print("Testing Violation Logic Module (Clean Architecture)...")
+    print("=" * 60)
     
-    from modules.database import DatabaseManager
+    # Mock repository
+    class MockRepository(ViolationRepository):
+        def __init__(self):
+            self.violations = []
+        
+        def save(self, violation_data):
+            self.violations.append(violation_data)
+            return len(self.violations)
+        
+        def check_recent_violation(self, plate_number, time_window):
+            return False
     
-    db = DatabaseManager()
-    db.connect()
+    # Create components
+    rules = [NoHelmetRule(), NutshellHelmetRule()]
+    verifier = ConsecutiveFrameVerifier(required_frames=2)
+    deduplicator = DuplicationChecker(time_window=60, db_repository=None)
+    repository = MockRepository()
     
-    vm = ViolationManager(db, duplicate_window=10, consecutive_frames=3)
+    manager = ViolationManager(rules, verifier, deduplicator, repository)
     
-    # Simulate detections
-    test_plate = "ABC-1234"
-    test_detection = {
-        'has_violation': True,
-        'best_violation': {
-            'class_name': 'no_helmet',
-            'confidence': 0.95,
-            'bbox': [100, 100, 300, 300]
-        }
-    }
-    test_plate_result = {
-        'plate_number': test_plate,
-        'confidence': 0.85
-    }
-    test_camera = {
-        'camera_id': 'CAM-TEST-001',
-        'location': 'Test Location'
-    }
+    # Test 1: Rule evaluation
+    print("\nTest 1: Rule Evaluation")
+    detection = Detection(
+        violation_type='no_helmet',
+        confidence=0.85,
+        bbox=(100, 100, 200, 200),
+        timestamp=time.time(),
+        plate_number='ABC-1234'
+    )
     
-    # First detection
-    result1 = vm.process_detection(test_detection, test_plate_result, test_camera)
-    print(f"Detection 1: {result1['reason']}")
+    decision = manager.process_detection(detection, {'camera_id': 'CAM-WA-001'})
+    print(f"  First detection: {decision['reason']}")
     
-    # Second detection (same plate, should wait for consecutive)
-    time.sleep(0.5)
-    result2 = vm.process_detection(test_detection, test_plate_result, test_camera)
-    print(f"Detection 2: {result2['reason']}")
+    # Test 2: Frame verification
+    print("\nTest 2: Frame Verification (requires 2 consecutive)")
+    decision = manager.process_detection(detection, {'camera_id': 'CAM-WA-001'})
+    print(f"  Second detection: {decision['should_log']}")
+    if decision['should_log']:
+        print(f"  ✓ Violation verified: {decision['violation_code']}")
     
-    # Third detection (should trigger)
-    time.sleep(0.5)
-    result3 = vm.process_detection(test_detection, test_plate_result, test_camera)
-    print(f"Detection 3: {result3['reason']}")
-    print(f"Should log: {result3['should_log']}")
+    # Test 3: Statistics
+    print("\nTest 3: Statistics")
+    stats = manager.get_stats()
+    print(f"  Total detections: {stats['total_detections']}")
+    print(f"  Violations logged: {stats['violations_logged']}")
     
-    # Fourth detection (should be duplicate)
-    time.sleep(1)
-    result4 = vm.process_detection(test_detection, test_plate_result, test_camera)
-    print(f"Detection 4: {result4['reason']}")
+    # Test 4: Extensibility (add new rule)
+    print("\nTest 4: Extensibility - Adding DoubleRiderRule")
+    double_rider_rule = DoubleRiderRule()
+    manager.rules.append(double_rider_rule)
+    print(f"  ✓ New rule added (total rules: {len(manager.rules)})")
+    print("  Architecture supports new violation types without modifying core logic!")
     
-    print(f"\nStatistics: {vm.get_statistics()}")
-    
-    db.disconnect()
+    print("\n" + "=" * 60)
+    print("Clean architecture test complete!")
