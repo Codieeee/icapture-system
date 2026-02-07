@@ -1,13 +1,18 @@
 """
 Configuration Management for iCapture System
 Centralizes all system settings and environment variables
+
+DEFENSE READY: All paths use dynamic resolution for cross-platform compatibility
 """
 
 import os
+import platform
+import shutil
 from pathlib import Path
 
 # ============================================
 # Base Directories
+# Defense Safe: Uses __file__ for dynamic path resolution
 # ============================================
 BASE_DIR = Path(__file__).resolve().parent.parent
 BACKEND_DIR = BASE_DIR / 'backend'
@@ -60,12 +65,14 @@ CAMERA_RETRY_DELAY = 2  # seconds
 
 # ============================================
 # Helmet Detection Configuration
+# DEFENSE READY: Default mode set to 'local' for offline operation
 # ============================================
 HELMET_DETECTION_CONFIG = {
-    # Detection mode: 'roboflow' or 'local'
-    'mode': 'roboflow',  # Switch to 'local' for offline YOLOv5
+    # Detection mode: 'local' (OFFLINE - Defense Default) or 'roboflow' (ONLINE - Backup)
+    # Defense Safe: 'local' mode prevents internet lag during demo
+    'mode': 'local',  # Changed from 'roboflow' - OFFLINE FIRST for defense stability
     
-    # Roboflow Cloud API Settings (for mode='roboflow')
+    # Roboflow Cloud API Settings (Backup mode - requires internet)
     'roboflow': {
         'api_key': os.getenv('ROBOFLOW_API_KEY', 'your_roboflow_api_key_here'),
         'project_name': 'helmet-detection',  # Your Roboflow project name
@@ -73,9 +80,10 @@ HELMET_DETECTION_CONFIG = {
         'confidence_threshold': 0.6
     },
     
-    # Local YOLOv5 Settings (for mode='local')
+    # Local YOLOv5 Settings (PRIMARY MODE - No internet required)
+    # Defense Safe: Runs completely offline using local model weights
     'local': {
-        'model_path': str(BACKEND_DIR / 'models' / 'yolov5' / 'best.pt'),
+        'model_path': str(BACKEND_DIR / 'models' / 'yolov5' / 'best.pt'),  # Defense Safe: relative path
         'device': 'cpu',  # Will auto-detect GPU in detector module
         'img_size': 640,
         'confidence_threshold': 0.6,
@@ -89,15 +97,65 @@ HELMET_DETECTION_CONFIG = {
 # Backward compatibility for modules still expecting YOLO_CONFIG
 # This reconstructs the original YOLO_CONFIG structure from the new HELMET_DETECTION_CONFIG
 YOLO_CONFIG = {
-    'violation_classes': ['no_helmet', 'nutshell_helmet']
+    'violation_classes': ['no_helmet', 'nutshell_helmet'],
+    # Defense Safe: Model path now uses relative paths from HELMET_DETECTION_CONFIG
+    'model_path': HELMET_DETECTION_CONFIG['local']['model_path']
 }
 
 # ============================================
 # OCR Configuration (Tesseract)
+# DEFENSE READY: Auto-detects Tesseract installation across platforms
 # ============================================
+
+def _find_tesseract_path():
+    """
+    Auto-detect Tesseract OCR installation path across different platforms
+    Defense Safe: No hardcoded paths - works on any computer
+    
+    Returns:
+        str: Path to tesseract executable or 'tesseract' for system PATH
+    """
+    # First, check if tesseract is in system PATH
+    tesseract_cmd = shutil.which('tesseract')
+    if tesseract_cmd:
+        return tesseract_cmd
+    
+    # Platform-specific search paths
+    if platform.system() == 'Windows':
+        # Common Windows installation paths
+        possible_paths = [
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+            os.path.expanduser(r'~\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'),
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+    
+    elif platform.system() == 'Linux':
+        # Common Linux paths
+        possible_paths = ['/usr/bin/tesseract', '/usr/local/bin/tesseract']
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+    
+    elif platform.system() == 'Darwin':  # macOS
+        # Common macOS paths (Homebrew)
+        possible_paths = [
+            '/usr/local/bin/tesseract',
+            '/opt/homebrew/bin/tesseract',
+            '/usr/bin/tesseract'
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
+    
+    # Fallback: assume it's in PATH
+    return 'tesseract'
+
 OCR_CONFIG = {
-    'tesseract_cmd': r'C:\Program Files\Tesseract-OCR\tesseract.exe',  # Windows path
-    # For Linux/Mac: '/usr/bin/tesseract' or just 'tesseract'
+    # Defense Safe: Auto-detected path works on Windows/Linux/Mac
+    'tesseract_cmd': _find_tesseract_path(),
     'config': '--psm 7 --oem 3 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-',
     'min_confidence': 0.5,  # Minimum OCR confidence
     'philippine_plate_pattern': r'^[A-Z]{3}-?\d{3,4}$'  # XXX-#### or XXX-###
@@ -116,6 +174,7 @@ VIOLATION_CONFIG = {
 
 # ============================================
 # Image Storage Configuration
+# Defense Safe: All paths use dynamic DATA_DIR
 # ============================================
 STORAGE_CONFIG = {
     'face_dir': str(DATA_DIR / 'violations' / 'faces'),
@@ -145,6 +204,7 @@ CORS_CONFIG = {
 
 # ============================================
 # Logging Configuration
+# Defense Safe: Uses dynamic DATA_DIR for logs
 # ============================================
 LOGGING_CONFIG = {
     'log_dir': str(DATA_DIR / 'logs'),
@@ -190,9 +250,13 @@ def generate_violation_code():
 
 # ============================================
 # Environment Check
+# Defense Safe: Validates all dynamic paths
 # ============================================
 def check_environment():
-    """Verify required directories and settings"""
+    """
+    Verify required directories and settings
+    Defense Ready: All checks use dynamic paths
+    """
     issues = []
     
     # Check directories
@@ -207,25 +271,34 @@ def check_environment():
         if not dir_path.exists():
             issues.append(f"Missing directory: {dir_path}")
     
-    # Check YOLOv5 model
-    model_path = Path(YOLO_CONFIG['model_path'])
-    if not model_path.exists():
-        issues.append(f"YOLOv5 model not found: {model_path}")
+    # Check YOLOv5 model (only for local mode)
+    if HELMET_DETECTION_CONFIG['mode'] == 'local':
+        model_path = Path(HELMET_DETECTION_CONFIG['local']['model_path'])
+        if not model_path.exists():
+            issues.append(f"YOLOv5 model not found: {model_path}")
     
-    # Check Tesseract (on Windows)
-    tesseract_path = Path(OCR_CONFIG['tesseract_cmd'])
-    if os.name == 'nt' and not tesseract_path.exists():
-        issues.append(f"Tesseract not found: {tesseract_path}")
+    # Check Tesseract
+    tesseract_path = OCR_CONFIG['tesseract_cmd']
+    if tesseract_path != 'tesseract':  # If not relying on PATH
+        if not os.path.exists(tesseract_path):
+            issues.append(f"Tesseract not found: {tesseract_path}")
+    else:
+        # Verify tesseract is in PATH
+        if not shutil.which('tesseract'):
+            issues.append("Tesseract not found in system PATH")
     
     return issues
 
 if __name__ == '__main__':
     print("iCapture System Configuration")
     print("=" * 50)
+    print(f"Platform: {platform.system()} {platform.release()}")
     print(f"Base Directory: {BASE_DIR}")
     print(f"Data Directory: {DATA_DIR}")
     print(f"Database: {DATABASE_CONFIG['database']} @ {DATABASE_CONFIG['host']}")
-    print(f"YOLOv5 Model: {YOLO_CONFIG['model_path']}")
+    print(f"\nAI Detection Mode: {HELMET_DETECTION_CONFIG['mode'].upper()} (Defense Safe: Offline First)")
+    print(f"YOLOv5 Model: {HELMET_DETECTION_CONFIG['local']['model_path']}")
+    print(f"Tesseract Path: {OCR_CONFIG['tesseract_cmd']}")
     print(f"Processing FPS: {PERFORMANCE_CONFIG['processing_fps']}")
     print(f"\nEnvironment Check:")
     issues = check_environment()
@@ -234,4 +307,4 @@ if __name__ == '__main__':
         for issue in issues:
             print(f"  - {issue}")
     else:
-        print("✓ All checks passed!")
+        print("✓ All checks passed! System is DEFENSE READY")

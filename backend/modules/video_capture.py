@@ -1,11 +1,14 @@
 """
 Video Capture Module for iCapture System
 Handles dual-camera input with real-time frame processing and auto-reconnection
+
+DEFENSE READY: Includes lighting quality checks to prevent OCR failures
 """
 
 import cv2
 import threading
 import time
+import numpy as np
 from queue import Queue
 import sys
 from pathlib import Path
@@ -17,8 +20,19 @@ from utils.logger import get_logger
 
 logger = get_logger('video_capture')
 
+# ============================================
+# Lighting Quality Constants
+# Defense Safe: Prevents OCR failures in low-light conditions
+# ============================================
+LOW_LIGHT_THRESHOLD = 50  # Average pixel intensity threshold
+LIGHTING_CHECK_ENABLED = True  # Set to False to disable warnings
+
 class CameraStream:
-    """Individual camera stream handler with thread-safe frame access"""
+    """
+    Individual camera stream handler with thread-safe frame access
+    
+    DEFENSE READY: Includes real-time lighting quality monitoring
+    """
     
     def __init__(self, camera_id, stream_url, fps=30):
         """
@@ -39,6 +53,10 @@ class CameraStream:
         self.running = False
         self.thread = None
         self.frame_lock = threading.Lock()
+        
+        # Defense Safe: Track lighting warnings to avoid spam
+        self.last_lighting_warning = 0
+        self.lighting_warning_interval = 5  # seconds between warnings
         
         logger.info(f"CameraStream initialized: {camera_id} @ {stream_url}")
     
@@ -65,6 +83,36 @@ class CameraStream:
         logger.error(f"Camera {self.camera_id} connection failed after {CAMERA_RETRY_ATTEMPTS} attempts")
         return False
     
+    def _check_lighting(self, frame):
+        """
+        Check frame brightness and warn if lighting is insufficient
+        
+        DEFENSE FEATURE: Prevents silent OCR failures during demo
+        
+        Args:
+            frame: BGR image frame
+        
+        Returns:
+            float: Average brightness (0-255)
+        """
+        if not LIGHTING_CHECK_ENABLED or frame is None:
+            return 255  # Skip check
+        
+        # Convert to grayscale and calculate average intensity
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        avg_brightness = np.mean(gray)
+        
+        # Defense Safe: Warn about low light (throttled to avoid console spam)
+        current_time = time.time()
+        if avg_brightness < LOW_LIGHT_THRESHOLD:
+            if current_time - self.last_lighting_warning > self.lighting_warning_interval:
+                print(f"⚠️  WARNING: LOW LIGHT DETECTED on {self.camera_id}. OCR MAY FAIL.")
+                print(f"    Brightness: {avg_brightness:.1f}/255 (Threshold: {LOW_LIGHT_THRESHOLD})")
+                logger.warning(f"Low light on {self.camera_id}: {avg_brightness:.1f}/255")
+                self.last_lighting_warning = current_time
+        
+        return avg_brightness
+    
     def start(self):
         """Start frame capture thread"""
         if not self.connect():
@@ -77,7 +125,11 @@ class CameraStream:
         return True
     
     def _capture_loop(self):
-        """Continuous frame capture loop (runs in separate thread)"""
+        """
+        Continuous frame capture loop (runs in separate thread)
+        
+        DEFENSE READY: Includes lighting quality monitoring
+        """
         consecutive_failures = 0
         max_failures = 10
         
@@ -86,6 +138,9 @@ class CameraStream:
                 ret, frame = self.cap.read()
                 
                 if ret:
+                    # Defense Feature: Check lighting quality
+                    self._check_lighting(frame)
+                    
                     with self.frame_lock:
                         self.frame = frame
                     consecutive_failures = 0
@@ -116,6 +171,23 @@ class CameraStream:
         with self.frame_lock:
             return self.frame.copy() if self.frame is not None else None
     
+    def get_frame_with_brightness(self):
+        """
+        Get latest frame with brightness information
+        
+        DEFENSE FEATURE: Allows external modules to check lighting
+        
+        Returns:
+            tuple: (frame, brightness) or (None, 0)
+        """
+        frame = self.get_frame()
+        if frame is None:
+            return None, 0
+        
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        brightness = np.mean(gray)
+        return frame, brightness
+    
     def is_active(self):
         """Check if camera is actively capturing"""
         return self.running and self.cap is not None and self.cap.isOpened()
@@ -134,7 +206,11 @@ class CameraStream:
         self.stop()
 
 class VideoCaptureManager:
-    """Manages multiple camera streams for the iCapture system"""
+    """
+    Manages multiple camera streams for the iCapture system
+    
+    DEFENSE READY: Includes system-wide lighting quality monitoring
+    """
     
     def __init__(self, config=None):
         """
@@ -145,7 +221,7 @@ class VideoCaptureManager:
         """
         self.config = config or CAMERA_CONFIG
         self.cameras = {}
-        logger.info("VideoCaptureManager initialized")
+        logger.info("VideoCaptureManager initialized with lighting checks enabled")
     
     def start_cameras(self):
         """Start all configured cameras"""
@@ -183,6 +259,25 @@ class VideoCaptureManager:
             return camera.get_frame()
         return None
     
+    def get_frame_with_quality_check(self, camera_type):
+        """
+        Get frame with lighting quality information
+        
+        DEFENSE FEATURE: Returns brightness data for advanced processing
+        
+        Args:
+            camera_type: 'wide_angle' or 'plate'
+        
+        Returns:
+            tuple: (frame, brightness, is_adequate)
+        """
+        camera = self.cameras.get(camera_type)
+        if camera:
+            frame, brightness = camera.get_frame_with_brightness()
+            is_adequate = brightness >= LOW_LIGHT_THRESHOLD
+            return frame, brightness, is_adequate
+        return None, 0, False
+    
     def is_camera_active(self, camera_type):
         """Check if specific camera is active"""
         camera = self.cameras.get(camera_type)
@@ -203,13 +298,20 @@ class VideoCaptureManager:
         return frames
     
     def get_camera_status(self):
-        """Get status of all cameras"""
+        """
+        Get status of all cameras including lighting quality
+        
+        DEFENSE READY: Includes brightness monitoring
+        """
         status = {}
         for cam_type, camera in self.cameras.items():
+            frame, brightness = camera.get_frame_with_brightness()
             status[cam_type] = {
                 'camera_id': camera.camera_id,
                 'active': camera.is_active(),
-                'stream_url': camera.stream_url
+                'stream_url': camera.stream_url,
+                'brightness': round(brightness, 1),
+                'lighting_adequate': brightness >= LOW_LIGHT_THRESHOLD
             }
         return status
     
@@ -229,10 +331,14 @@ def test_cameras(duration=10):
     """
     Test camera capture for specified duration
     
+    DEFENSE READY: Displays lighting quality warnings
+    
     Args:
         duration: Test duration in seconds
     """
-    print("Starting camera test...")
+    print("Starting camera test with lighting quality monitoring...")
+    print(f"Low light threshold: {LOW_LIGHT_THRESHOLD}/255\n")
+    
     manager = VideoCaptureManager()
     
     if not manager.start_cameras():
@@ -240,6 +346,8 @@ def test_cameras(duration=10):
         return
     
     print(f"Cameras started. Testing for {duration} seconds...")
+    print("Watch for lighting warnings if environment is too dark.\n")
+    
     start_time = time.time()
     frame_count = {'wide_angle': 0, 'plate': 0}
     
@@ -250,6 +358,14 @@ def test_cameras(duration=10):
             for cam_type, frame in frames.items():
                 if frame is not None:
                     frame_count[cam_type] += 1
+                    
+                    # Defense Feature: Display brightness on frame
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    brightness = np.mean(gray)
+                    color = (0, 255, 0) if brightness >= LOW_LIGHT_THRESHOLD else (0, 0, 255)
+                    
+                    cv2.putText(frame, f"Brightness: {brightness:.1f}/255", 
+                               (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                     
                     # Display frame
                     cv2.imshow(f'{cam_type.replace("_", " ").title()}', frame)
@@ -267,7 +383,14 @@ def test_cameras(duration=10):
     for cam_type, count in frame_count.items():
         fps = count / elapsed
         print(f"  {cam_type}: {count} frames ({fps:.2f} FPS)")
+    
+    # Defense Summary
+    print("\nLighting Quality Summary:")
+    status = manager.get_camera_status()
+    for cam_type, info in status.items():
+        quality = "✓ ADEQUATE" if info['lighting_adequate'] else "⚠ LOW LIGHT"
+        print(f"  {cam_type}: {info['brightness']}/255 - {quality}")
 
 if __name__ == '__main__':
-    # Run camera test
+    # Run camera test with lighting monitoring
     test_cameras(duration=10)
